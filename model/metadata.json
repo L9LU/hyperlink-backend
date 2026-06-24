@@ -1,0 +1,74 @@
+{
+  "model_name": "Gradient Boosting",
+  "features": [
+    "Age",
+    "Salt_Intake",
+    "Stress_Score",
+    "BP_History",
+    "Sleep_Duration",
+    "BMI",
+    "Medication",
+    "Family_History",
+    "Exercise_Level",
+    "Smoking_Status",
+    "BMI_Category",
+    "Age_Group",
+    "Poor_Sleep",
+    "High_Stress",
+    "High_Salt"
+  ],
+  "label_encoders": {
+    "BP_History": [
+      "Hypertension",
+      "Normal",
+      "Prehypertension"
+    ],
+    "Medication": [
+      "ACE Inhibitor",
+      "Beta Blocker",
+      "Diuretic",
+      "None",
+      "Other"
+    ],
+    "Family_History": [
+      "No",
+      "Yes"
+    ],
+    "Exercise_Level": [
+      "High",
+      "Low",
+      "Moderate"
+    ],
+    "Smoking_Status": [
+      "Non-Smoker",
+      "Smoker"
+    ],
+    "BMI_Category": [
+      "Normal",
+      "Obese",
+      "Overweight",
+      "Underweight"
+    ],
+    "Age_Group": [
+      "Elderly",
+      "Middle",
+      "Senior",
+      "Young"
+    ]
+  },
+  "metrics": {
+    "accuracy": 0.9748,
+    "precision": 0.9712,
+    "recall": 0.9806,
+    "f1": 0.9758,
+    "auc": 0.996,
+    "cv_f1_mean": 0.9839,
+    "cv_f1_std": 0.0033
+  },
+  "risk_thresholds": {
+    "HIGH": 70,
+    "MODERATE": 40,
+    "LOW": 0
+  },
+  "version": "1.0.0"
+}

@@ -1,0 +1,30 @@
+# HyperLink Backend — .gitignore
+# NEVER commit these files to GitHub
+
+# Environment & credentials
+.env
+firebase_credentials.json
+*.json.key
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+
+# ML Model (large files — store separately)
+model/model.pkl
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
