@@ -21,6 +21,14 @@ app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-change-in-product
 # Allows your React frontend on Netlify to call this API
 CORS(app, origins=['http://localhost:5173', 'https://*.netlify.app'])
 
+# Cache control headers for PWA service worker 
+@app.after_request
+def add_cache_control_headers(response):
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response 
+
 # ── INIT FIREBASE ─────────────────────────────────────────────────────────────
 from utils.firebase import init_firebase
 init_firebase()
@@ -57,7 +65,13 @@ def health():
             'alerts':  ['/alerts/notify', '/alerts/history'],
         }
     }), 200
-
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({
+        'status': 'online',
+        'service': 'HyperLink API',
+        'version': '1.0.0'
+    }), 200
 # ── ERROR HANDLERS ────────────────────────────────────────────────────────────
 @app.errorhandler(404)
 def not_found(e):
