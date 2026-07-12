@@ -50,8 +50,8 @@ def register():
             if not data.get(field):
                 return jsonify({'error': f'{field} is required'}), 400
 
-        if data['role'] not in ['patient', 'doctor']:
-            return jsonify({'error': 'role must be patient or doctor'}), 400
+        if data['role'] not in ['patient', 'doctor', 'pharmacist']:
+            return jsonify({'error': 'role must be patient, doctor, or pharmacist'}), 400
 
         db = get_db()
 
@@ -91,6 +91,12 @@ def register():
                 'hospital':  data.get('hospital', ''),
                 'specialty': data.get('specialty', ''),
             })
+        if data['role'] == 'pharmacist':
+            user.update({
+                'pharmacy_name': data.get('pharmacy_name', ''),
+                'pharmacy_address': data.get('pharmacy_address', ''),
+                'license_number': data.get('license_number', ''),
+            })    
 
         # Save to Firestore
         doc_ref = db.collection('users').document()
