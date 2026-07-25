@@ -19,7 +19,10 @@ app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-change-in-product
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
 # Allows your React frontend on Netlify to call this API
-CORS(app, origins=['http://localhost:5173', 'https://*.netlify.app'])
+CORS(app, origins=[
+    'http://localhost:5173',
+    'https://hyperlinkk.netlify.app',
+], supports_credentials=True)
 
 # Cache control headers for PWA service worker 
 @app.after_request
