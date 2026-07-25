@@ -5,46 +5,34 @@ from flask import Blueprint, request, jsonify
 from utils.firebase import get_db
 from datetime import datetime
 import hashlib
+import bcrypt
 import os
 
 auth_bp = Blueprint('auth', __name__)
 
 def hash_password(password: str) -> str:
-    """Simple SHA-256 hash. In production use bcrypt."""
-    return hashlib.sha256(password.encode()).hexdigest()
+    """Hash a password with bcrypt. Returns a string safe to store in Firestore."""
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    """
+    Verify a password against a stored hash.
+    Supports both new bcrypt hashes and legacy SHA-256 hashes for backward compatibility.
+    """
+    # bcrypt hashes always start with $2b$, $2a$, or $2y$
+    if stored_hash.startswith(('$2b$', '$2a$', '$2y$')):
+        return bcrypt.checkpw(password.encode(), stored_hash.encode())
+    else:
+        # Legacy SHA-256 hash — old accounts created before this fix
+        legacy_hash = hashlib.sha256(password.encode()).hexdigest()
+        return legacy_hash == stored_hash
 
 # ── REGISTER ──────────────────────────────────────────────────────────────────
 @auth_bp.route('/auth/register', methods=['POST'])
 def register():
-    """
-    Register a new user.
-
-    Body:
-        {
-            "name": "John Doe",
-            "email": "john@example.com",
-            "password": "securepassword",
-            "role": "patient" | "doctor",
-            "phone": "+2348012345678",
-
-            // Patient only:
-            "age": 59,
-            "bmi": 28.8,
-            "family_history": "Yes",
-            "exercise_level": "Moderate",
-            "smoking_status": "Non-Smoker",
-            "bp_history": "Hypertension",
-            "medication": "Other",
-
-            // Doctor only:
-            "hospital": "Lagos University Teaching Hospital",
-            "specialty": "Cardiology"
-        }
-    """
     try:
         data = request.get_json()
 
-        # Required fields
         required = ['name', 'email', 'password', 'role']
         for field in required:
             if not data.get(field):
@@ -55,12 +43,10 @@ def register():
 
         db = get_db()
 
-        # Check if email already exists
         existing = db.collection('users').where('email', '==', data['email']).get()
         if existing:
             return jsonify({'error': 'Email already registered'}), 409
 
-        # Build user document
         user = {
             'name':       data['name'],
             'email':      data['email'],
@@ -70,7 +56,6 @@ def register():
             'created_at': datetime.utcnow().isoformat(),
         }
 
-        # Patient-specific fields
         if data['role'] == 'patient':
             user.update({
                 'age':            data.get('age'),
@@ -85,14 +70,13 @@ def register():
                 'risk_score':     None,
             })
 
-        # Doctor-specific fields
         if data['role'] == 'doctor':
             user.update({
                 'hospital':        data.get('hospital', ''),
                 'specialty':       data.get('specialty', ''),
                 'department':      data.get('department', ''),
                 'license_number':  data.get('license_number', ''),
-                'verified':        False,   # requires manual MDCN check before full access
+                'verified':        False,
             })
 
         if data['role'] == 'pharmacist':
@@ -100,10 +84,9 @@ def register():
                 'pharmacy_name':    data.get('pharmacy_name', ''),
                 'pharmacy_address': data.get('pharmacy_address', ''),
                 'license_number':   data.get('license_number', ''),
-                'verified':         False,   # requires manual license check before full access
+                'verified':         False,
             })
 
-        # Save to Firestore
         doc_ref = db.collection('users').document()
         doc_ref.set(user)
         user_id = doc_ref.id
@@ -122,12 +105,6 @@ def register():
 # ── LOGIN ─────────────────────────────────────────────────────────────────────
 @auth_bp.route('/auth/login', methods=['POST'])
 def login():
-    """
-    Login a user.
-
-    Body:
-        { "email": "john@example.com", "password": "securepassword" }
-    """
     try:
         data = request.get_json()
         email    = data.get('email')
@@ -145,8 +122,14 @@ def login():
         user_doc  = users[0]
         user_data = user_doc.to_dict()
 
-        if user_data['password'] != hash_password(password):
+        if not verify_password(password, user_data['password']):
             return jsonify({'error': 'Invalid email or password'}), 401
+
+        # Lazy migration: if this account still has an old SHA-256 hash, upgrade it to bcrypt now
+        if not user_data['password'].startswith(('$2b$', '$2a$', '$2y$')):
+            db.collection('users').document(user_doc.id).update({
+                'password': hash_password(password)
+            })
 
         response = {
             'message': 'Login successful',
@@ -156,11 +139,9 @@ def login():
             'email':   user_data['email'],
         }
 
-        # Include verification status for roles that need it
         if user_data['role'] in ['doctor', 'pharmacist']:
             response['verified'] = user_data.get('verified', False)
 
-        # Include profile fields patients need for risk prediction
         if user_data['role'] == 'patient':
             response['age']             = user_data.get('age')
             response['bmi']             = user_data.get('bmi')

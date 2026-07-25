@@ -7,3 +7,4 @@ numpy==1.26.4
 scikit-learn==1.4.2
 pandas==2.2.0
 gunicorn==21.2.0
+bcrypt==4.2.0
