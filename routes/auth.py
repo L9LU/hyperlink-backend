@@ -3,6 +3,7 @@
 
 from flask import Blueprint, request, jsonify
 from utils.firebase import get_db
+from utils.notifications import notify_new_verification_request
 from datetime import datetime
 import hashlib
 import bcrypt
@@ -90,6 +91,24 @@ def register():
         doc_ref = db.collection('users').document()
         doc_ref.set(user)
         user_id = doc_ref.id
+
+        if data['role'] == 'doctor':
+            notify_new_verification_request(
+                role='doctor',
+                email=data['email'],
+                name=data['name'],
+                license_number=data.get('license_number', ''),
+                extra_info=f"Hospital: {data.get('hospital', '')}, Specialty: {data.get('specialty', '')}"
+            )
+
+        if data['role'] == 'pharmacist':
+            notify_new_verification_request(
+                role='pharmacist',
+                email=data['email'],
+                name=data['name'],
+                license_number=data.get('license_number', ''),
+                extra_info=f"Pharmacy: {data.get('pharmacy_name', '')}"
+            )
 
         return jsonify({
             'message': 'Registration successful',
