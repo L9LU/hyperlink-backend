@@ -10,17 +10,17 @@ SETUP:
 
 2. Add these to your .env file:
 
-    # --- Email (using Gmail SMTP) ---
-    SMTP_EMAIL=your-gmail-address@gmail.com
-    SMTP_APP_PASSWORD=your-16-char-gmail-app-password
+    # --- Email (using Resend API) ---
+    RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxx
     NOTIFY_EMAIL=where-you-want-to-receive-alerts@gmail.com
 
     # --- Slack ---
     SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ
 
-   For Gmail: you need an "App Password", not your normal Gmail password.
-   Generate one at: https://myaccount.google.com/apppasswords
-   (Requires 2-Step Verification to be turned on for your Google account.)
+   For Resend: sign up at https://resend.com, go to API Keys, create one.
+   Without a verified custom domain, Resend only allows sending FROM
+   onboarding@resend.dev and TO the email address you signed up with —
+   which is fine here since NOTIFY_EMAIL is just your own inbox.
 
    For Slack: create an Incoming Webhook at https://api.slack.com/messaging/webhooks
    — pick the channel you want alerts to land in, copy the webhook URL.
@@ -56,62 +56,38 @@ Registration must always succeed even if the notification fails.
 """
 
 import os
-import smtplib
-import socket
 import logging
 import threading
-from contextlib import contextmanager
-from email.mime.text import MIMEText
 
 import requests
 
 logger = logging.getLogger(__name__)
 
-SMTP_EMAIL = os.environ.get("SMTP_EMAIL")
-SMTP_APP_PASSWORD = os.environ.get("SMTP_APP_PASSWORD")
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
 
 
-@contextmanager
-def _force_ipv4():
-    """
-    Temporarily force socket.getaddrinfo to only return IPv4 addresses.
-
-    Some hosts (Render included) have IPv6 'configured' in the container but
-    no actual outbound IPv6 route, so an SMTP connection to a dual-stack
-    host like smtp.gmail.com can fail immediately with
-    '[Errno 101] Network is unreachable' when Python tries IPv6 first.
-    Scoping this to just the SMTP call avoids touching any other network
-    calls in the app (Firestore, Slack webhook, etc.).
-    """
-    original_getaddrinfo = socket.getaddrinfo
-
-    def ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
-        return original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
-
-    socket.getaddrinfo = ipv4_only_getaddrinfo
-    try:
-        yield
-    finally:
-        socket.getaddrinfo = original_getaddrinfo
-
-
 def _send_email(subject: str, body: str):
-    if not (SMTP_EMAIL and SMTP_APP_PASSWORD and NOTIFY_EMAIL):
-        logger.warning("Email notification skipped — SMTP env vars not fully set.")
+    if not (RESEND_API_KEY and NOTIFY_EMAIL):
+        logger.warning("Email notification skipped — RESEND_API_KEY or NOTIFY_EMAIL not set.")
         return
     try:
-        msg = MIMEText(body)
-        msg["Subject"] = subject
-        msg["From"] = SMTP_EMAIL
-        msg["To"] = NOTIFY_EMAIL
-
-        with _force_ipv4():
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as server:
-                server.login(SMTP_EMAIL, SMTP_APP_PASSWORD)
-                server.sendmail(SMTP_EMAIL, [NOTIFY_EMAIL], msg.as_string())
-        logger.info("Verification email notification sent successfully.")
+        response = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+            json={
+                "from": "HyperLink Alerts <onboarding@resend.dev>",
+                "to": [NOTIFY_EMAIL],
+                "subject": subject,
+                "text": body,
+            },
+            timeout=10,
+        )
+        if response.status_code >= 400:
+            logger.error(f"Resend API error ({response.status_code}): {response.text}")
+        else:
+            logger.info("Verification email notification sent successfully.")
     except Exception as e:
         logger.error(f"Failed to send verification email notification: {e}")
 
