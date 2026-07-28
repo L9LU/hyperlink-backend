@@ -60,12 +60,54 @@ import logging
 import threading
 
 import requests
+from twilio.rest import Client
 
 logger = logging.getLogger(__name__)
 
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
+
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
+TWILIO_WHATSAPP_NUMBER = os.environ.get("TWILIO_WHATSAPP_NUMBER")  # e.g. whatsapp:+14155238886
+
+
+def _format_whatsapp_number(phone: str) -> str:
+    """
+    Normalize a stored phone number into Twilio's WhatsApp format:
+    'whatsapp:+2348012345678'
+    Strips spaces/dashes. Assumes the number already includes a country code
+    (as collected at registration, e.g. '+234 123 456 7890').
+    """
+    cleaned = "".join(ch for ch in phone if ch.isdigit() or ch == "+")
+    if not cleaned.startswith("+"):
+        cleaned = "+" + cleaned
+    return f"whatsapp:{cleaned}"
+
+
+def send_whatsapp_message(to_phone: str, body: str):
+    """
+    Send a WhatsApp message via Twilio. Best-effort — logs errors, never raises.
+    Requires the recipient to have joined the Twilio sandbox (for now, until
+    a production WhatsApp sender is approved).
+    """
+    if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_NUMBER):
+        logger.warning("WhatsApp message skipped — Twilio env vars not fully set.")
+        return
+    if not to_phone:
+        logger.warning("WhatsApp message skipped — recipient has no phone number on file.")
+        return
+    try:
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        client.messages.create(
+            from_=TWILIO_WHATSAPP_NUMBER,
+            to=_format_whatsapp_number(to_phone),
+            body=body,
+        )
+        logger.info(f"WhatsApp message sent to {to_phone}.")
+    except Exception as e:
+        logger.error(f"Failed to send WhatsApp message to {to_phone}: {e}")
 
 
 def _send_email(subject: str, body: str):
@@ -125,6 +167,23 @@ def _do_notify(role: str, email: str, name: str, license_number: str, extra_info
 
     _send_email(subject, body)
     _send_slack(slack_text)
+
+
+def notify_doctor_verified(name: str, phone: str):
+    """
+    Fire a WhatsApp message to a doctor confirming their account is verified.
+    Runs in a background thread so it never blocks the approve endpoint's response.
+    """
+    body = (
+        f"Hi Dr. {name}, great news — your HyperLink account has been verified! "
+        f"You can now log in and start monitoring your linked patients."
+    )
+    thread = threading.Thread(
+        target=send_whatsapp_message,
+        args=(phone, body),
+        daemon=True,
+    )
+    thread.start()
 
 
 def notify_new_verification_request(role: str, email: str, name: str = "",

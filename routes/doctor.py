@@ -3,9 +3,14 @@
 
 from flask import Blueprint, request, jsonify
 from utils.firebase import get_db
+from utils.notifications import notify_doctor_verified
 from datetime import datetime, timedelta
+import os
 
 doctor_bp = Blueprint('doctor', __name__)
+
+ADMIN_SECRET = os.environ.get("ADMIN_SECRET")  # you set this yourself, keep it private
+
 
 # ── GET RANKED PATIENTS ───────────────────────────────────────────────────────
 @doctor_bp.route('/doctor/patients', methods=['GET'])
@@ -204,6 +209,51 @@ def get_patient_detail(patient_id):
             'readings': readings,
             'stats':    stats,
         }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ── APPROVE DOCTOR/PHARMACIST VERIFICATION ────────────────────────────────────
+@doctor_bp.route('/admin/approve-user', methods=['POST'])
+def approve_user():
+    """
+    Approve a doctor or pharmacist's MDCN verification.
+    Sets verified=True and sends a WhatsApp confirmation (doctors only, for now).
+
+    Requires header: X-Admin-Secret: <your ADMIN_SECRET>
+
+    Body:
+        { "user_id": "abc123" }
+    """
+    try:
+        provided_secret = request.headers.get('X-Admin-Secret')
+        if not ADMIN_SECRET or provided_secret != ADMIN_SECRET:
+            return jsonify({'error': 'Unauthorized'}), 401
+
+        data = request.get_json()
+        user_id = data.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'user_id is required'}), 400
+
+        db = get_db()
+        user_doc = db.collection('users').document(user_id).get()
+        if not user_doc.exists:
+            return jsonify({'error': 'User not found'}), 404
+
+        user_data = user_doc.to_dict()
+        if user_data.get('role') not in ['doctor', 'pharmacist']:
+            return jsonify({'error': 'Only doctors and pharmacists require verification'}), 400
+
+        db.collection('users').document(user_id).update({'verified': True})
+
+        if user_data.get('role') == 'doctor':
+            notify_doctor_verified(
+                name=user_data.get('name', ''),
+                phone=user_data.get('phone', ''),
+            )
+
+        return jsonify({'message': f"{user_data.get('name')} has been verified"}), 200
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
