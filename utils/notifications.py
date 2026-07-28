@@ -186,6 +186,51 @@ def notify_doctor_verified(name: str, phone: str):
     thread.start()
 
 
+def notify_patient_high_reading(name: str, phone: str, systolic: int, diastolic: int,
+                                  risk_level: str, risk_label: str = ""):
+    """
+    Fire a WhatsApp alert to a patient whose reading came back HIGH or CRISIS.
+    Runs in a background thread so it never blocks the /records/log response.
+    """
+    if risk_level == 'CRISIS':
+        body = (
+            f"⚠️ {name}, your latest reading ({systolic}/{diastolic} mmHg) is in the "
+            f"CRISIS range. Please seek medical attention now or contact your doctor "
+            f"immediately. If you feel unwell, go to the nearest hospital."
+        )
+    else:
+        body = (
+            f"Hi {name}, your latest reading ({systolic}/{diastolic} mmHg) is HIGH"
+            f"{f' ({risk_label})' if risk_label else ''}. Please log readings regularly "
+            f"and consider reaching out to your doctor if this continues."
+        )
+    thread = threading.Thread(
+        target=send_whatsapp_message,
+        args=(phone, body),
+        daemon=True,
+    )
+    thread.start()
+
+
+def notify_doctor_crisis_patient(doctor_name: str, doctor_phone: str, patient_name: str,
+                                   systolic: int, diastolic: int):
+    """
+    Fire a WhatsApp alert to a doctor when their linked patient logs a CRISIS reading.
+    Runs in a background thread so it never blocks the /records/log response.
+    """
+    body = (
+        f"⚠️ Dr. {doctor_name}, your patient {patient_name} just logged a CRISIS-level "
+        f"reading: {systolic}/{diastolic} mmHg. Please review their case on HyperLink "
+        f"and reach out if needed."
+    )
+    thread = threading.Thread(
+        target=send_whatsapp_message,
+        args=(doctor_phone, body),
+        daemon=True,
+    )
+    thread.start()
+
+
 def notify_new_verification_request(role: str, email: str, name: str = "",
                                       license_number: str = "", extra_info: str = ""):
     """

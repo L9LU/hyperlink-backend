@@ -4,6 +4,7 @@
 from flask import Blueprint, request, jsonify
 from utils.firebase import get_db
 from utils.bp import classify_bp
+from utils.notifications import notify_patient_high_reading, notify_doctor_crisis_patient
 from datetime import datetime
 
 records_bp = Blueprint('records', __name__)
@@ -81,6 +82,37 @@ def log_reading():
 
         # If crisis or high, trigger alert
         should_alert = classification['is_crisis'] or classification['is_high']
+
+        # ── WhatsApp alerts ──────────────────────────────────────────────────
+        # Patient gets alerted on HIGH or CRISIS. Linked doctor gets alerted
+        # only on CRISIS (to avoid alert fatigue on less urgent cases).
+        if should_alert:
+            patient_doc = db.collection('users').document(data['patient_id']).get()
+            if patient_doc.exists:
+                patient_data = patient_doc.to_dict()
+
+                notify_patient_high_reading(
+                    name=patient_data.get('name', ''),
+                    phone=patient_data.get('phone', ''),
+                    systolic=sys_val,
+                    diastolic=dia_val,
+                    risk_level=classification['level'],
+                    risk_label=classification['label'],
+                )
+
+                if classification['is_crisis']:
+                    linked_doctor_id = patient_data.get('linked_doctor')
+                    if linked_doctor_id:
+                        doctor_doc = db.collection('users').document(linked_doctor_id).get()
+                        if doctor_doc.exists:
+                            doctor_data = doctor_doc.to_dict()
+                            notify_doctor_crisis_patient(
+                                doctor_name=doctor_data.get('name', ''),
+                                doctor_phone=doctor_data.get('phone', ''),
+                                patient_name=patient_data.get('name', ''),
+                                systolic=sys_val,
+                                diastolic=dia_val,
+                            )
 
         return jsonify({
             'message':        'Reading logged successfully',
