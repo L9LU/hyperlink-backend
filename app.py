@@ -46,12 +46,14 @@ from routes.records import records_bp
 from routes.predict import predict_bp
 from routes.doctor  import doctor_bp
 from routes.alerts  import alerts_bp
+from routes.patient import patient_bp
 
 app.register_blueprint(auth_bp)
 app.register_blueprint(records_bp)
 app.register_blueprint(predict_bp)
 app.register_blueprint(doctor_bp)
 app.register_blueprint(alerts_bp)
+app.register_blueprint(patient_bp)
 
 # ── HEALTH CHECK ──────────────────────────────────────────────────────────────
 @app.route('/', methods=['GET'])
@@ -66,6 +68,7 @@ def health():
             'predict': ['/predict', '/predict/batch'],
             'doctor':  ['/doctor/patients', '/doctor/patient/<id>', '/doctor/link-patient', '/doctor/link-caregiver'],
             'alerts':  ['/alerts/notify', '/alerts/history'],
+            'patient': ['/patient/update-measurements'],
         }
     }), 200
 @app.route('/health', methods=['GET'])
