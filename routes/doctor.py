@@ -3,9 +3,13 @@
 
 from flask import Blueprint, request, jsonify
 from utils.firebase import get_db
-from utils.notifications import notify_doctor_verified
+from utils.notifications import notify_doctor_verified, send_via_channels
 from datetime import datetime, timedelta, timezone
+import logging
 import os
+import threading
+
+logger = logging.getLogger(__name__)
 
 doctor_bp = Blueprint('doctor', __name__)
 
@@ -417,6 +421,214 @@ def get_patient_detail(patient_id):
             'stats':     stats,
             'followups': followups,
         }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ── PATIENT & CAREGIVER NUDGES ────────────────────────────────────────────────
+# Escalation for patients who stop logging:
+#   NUDGE_AFTER_DAYS      patient gets a WhatsApp + SMS reminder
+#   CAREGIVER_AFTER_DAYS  their linked caregiver is told too
+#   FOLLOWUP_DAYS         the doctor's follow-up flag appears (set this higher,
+#                         e.g. 5, so doctors only see patients the nudges missed)
+# A streak resets as soon as the patient logs a new reading.
+NUDGE_AFTER_DAYS         = int(os.getenv('NUDGE_AFTER_DAYS', 2))
+NUDGE_COOLDOWN_DAYS      = int(os.getenv('NUDGE_COOLDOWN_DAYS', 2))
+NUDGE_MAX_PER_STREAK     = int(os.getenv('NUDGE_MAX_PER_STREAK', 3))
+CAREGIVER_AFTER_DAYS     = int(os.getenv('CAREGIVER_AFTER_DAYS', 3))
+CAREGIVER_COOLDOWN_DAYS  = int(os.getenv('CAREGIVER_COOLDOWN_DAYS', 3))
+CAREGIVER_MAX_PER_STREAK = int(os.getenv('CAREGIVER_MAX_PER_STREAK', 2))
+# Patients silent for longer than this are treated as churned and left to the
+# doctor's follow-up flag instead of being messaged forever.
+NUDGE_MAX_SILENT_DAYS    = int(os.getenv('NUDGE_MAX_SILENT_DAYS', 30))
+NUDGE_CHANNELS = [c.strip().lower() for c in os.getenv('NUDGE_CHANNELS', 'whatsapp,sms').split(',') if c.strip()]
+# Only send between these hours, Lagos time (UTC+1, no daylight saving).
+SEND_WINDOW_START = int(os.getenv('SEND_WINDOW_START', 8))
+SEND_WINDOW_END   = int(os.getenv('SEND_WINDOW_END', 20))
+LAGOS_UTC_OFFSET  = 1
+
+
+def _first_name(name):
+    return (name or '').strip().split(' ')[0] or 'there'
+
+
+def _patient_nudge_text(p, days, never_logged):
+    first = _first_name(p.get('name'))
+    if never_logged:
+        return (f"Hi {first}, you haven't logged your first blood pressure reading on "
+                f"HyperLink yet. Please take a reading today and log it. It only takes a minute.")
+    return (f"Hi {first}, we haven't seen a blood pressure reading from you in {days} days. "
+            f"Please take a reading today and log it on HyperLink so your care team can look after you.")
+
+
+def _caregiver_text(p, days, never_logged):
+    who = p.get('name') or 'Your family member'
+    if never_logged:
+        return (f"Hello, this is HyperLink. {who} hasn't logged any blood pressure "
+                f"readings yet. Please check in with them and remind them to take a reading.")
+    return (f"Hello, this is HyperLink. {who} hasn't logged a blood pressure reading in "
+            f"{days} days. Please check in with them and remind them to take a reading.")
+
+
+def _streak_count(count, last_sent, last_log_dt):
+    """Alerts already sent in the patient's current silent streak (0 once they log again)."""
+    if not last_sent:
+        return 0
+    if last_log_dt and last_log_dt > last_sent:
+        return 0
+    return count or 0
+
+
+def _due(last_sent, cooldown_days, now):
+    return last_sent is None or (now - last_sent) >= timedelta(days=cooldown_days)
+
+
+def _plan_nudges(db, now):
+    """Work out who should be messaged right now. Sends nothing."""
+    actions = []
+    for doc in db.collection('users').where('role', '==', 'patient').get():
+        p = {'id': doc.id, **doc.to_dict()}
+
+        latest_q = (
+            db.collection('readings')
+              .where('patient_id', '==', doc.id)
+              .order_by('timestamp', direction='DESCENDING')
+              .limit(1)
+              .get()
+        )
+        latest = latest_q[0].to_dict() if latest_q else None
+
+        if latest:
+            last_log_dt = parse_ts(latest.get('timestamp'))
+            if not last_log_dt:
+                continue  # can't tell when they last logged, so don't guess
+            days = max((now - last_log_dt).days, 0)
+            never_logged = False
+        else:
+            last_log_dt = None
+            start = parse_ts(p.get('linked_at')) or parse_ts(p.get('created_at'))
+            if not start:
+                continue  # no start date on record
+            days = max((now - start).days, 0)
+            never_logged = True
+
+        if days < NUDGE_AFTER_DAYS or days > NUDGE_MAX_SILENT_DAYS:
+            continue
+
+        # The doctor just followed up: don't pile more messages on top.
+        followup_dt = parse_ts(p.get('last_followup_at'))
+        if followup_dt and (now - followup_dt) < timedelta(days=FOLLOWUP_SNOOZE_DAYS):
+            continue
+
+        base = {
+            'patient_id': doc.id,
+            'doctor_id':  p.get('linked_doctor'),
+            'name':       p.get('name'),
+            'days':       days,
+            'never_logged': never_logged,
+        }
+
+        # Patient reminder
+        last_nudge = parse_ts(p.get('last_nudge_at'))
+        n_count = _streak_count(p.get('nudge_count'), last_nudge, last_log_dt)
+        if (p.get('phone') and n_count < NUDGE_MAX_PER_STREAK
+                and _due(last_nudge, NUDGE_COOLDOWN_DAYS, now)):
+            actions.append({**base, 'kind': 'patient', 'phone': p['phone'], 'count': n_count,
+                            'body': _patient_nudge_text(p, days, never_logged)})
+
+        # Caregiver alert
+        caregiver = p.get('linked_caregiver')
+        last_cg = parse_ts(p.get('caregiver_last_alert_at'))
+        c_count = _streak_count(p.get('caregiver_alert_count'), last_cg, last_log_dt)
+        if (caregiver and days >= CAREGIVER_AFTER_DAYS and c_count < CAREGIVER_MAX_PER_STREAK
+                and _due(last_cg, CAREGIVER_COOLDOWN_DAYS, now)):
+            actions.append({**base, 'kind': 'caregiver', 'phone': caregiver, 'count': c_count,
+                            'body': _caregiver_text(p, days, never_logged)})
+
+    return actions
+
+
+def _execute_nudges(actions):
+    """Send the planned messages and record what happened. Runs in a background thread."""
+    db = get_db()
+    for a in actions:
+        try:
+            results = send_via_channels(a['phone'], a['body'], NUDGE_CHANNELS)
+            sent_any = any(results.values())
+            now_iso = datetime.utcnow().isoformat()
+
+            # Only move the counters if something was accepted, so a misconfigured
+            # sender doesn't use up a patient's nudges without reaching them.
+            if sent_any:
+                if a['kind'] == 'patient':
+                    update = {'last_nudge_at': now_iso, 'nudge_count': a['count'] + 1}
+                else:
+                    update = {'caregiver_last_alert_at': now_iso,
+                              'caregiver_alert_count': a['count'] + 1}
+                db.collection('users').document(a['patient_id']).update(update)
+
+            db.collection('nudges').add({
+                'patient_id':   a['patient_id'],
+                'doctor_id':    a.get('doctor_id'),
+                'kind':         a['kind'],
+                'days_silent':  a['days'],
+                'never_logged': a['never_logged'],
+                'channels':     results,
+                'sent':         sent_any,
+                'at':           now_iso,
+            })
+        except Exception as e:
+            logger.error(f"Nudge failed for patient {a.get('patient_id')}: {e}")
+
+
+@doctor_bp.route('/admin/send-nudges', methods=['POST'])
+def send_nudges():
+    """
+    Remind patients who have stopped logging, and tell their caregiver.
+    Call this once a day from a scheduler (Railway cron, cron-job.org, ...).
+
+    Requires header: X-Admin-Secret: <your ADMIN_SECRET>
+
+    Query params:
+        dry_run=true   list who WOULD be messaged, send nothing
+        force=true     ignore the 8am-8pm Lagos send window (for testing)
+    """
+    try:
+        provided_secret = request.headers.get('X-Admin-Secret')
+        if not ADMIN_SECRET or provided_secret != ADMIN_SECRET:
+            return jsonify({'error': 'Unauthorized'}), 401
+
+        truthy  = ('1', 'true', 'yes')
+        dry_run = request.args.get('dry_run', '').lower() in truthy
+        force   = request.args.get('force', '').lower() in truthy
+
+        now = datetime.utcnow()
+        local_hour = (now + timedelta(hours=LAGOS_UTC_OFFSET)).hour
+        in_window  = SEND_WINDOW_START <= local_hour < SEND_WINDOW_END
+
+        actions = _plan_nudges(get_db(), now)
+
+        if dry_run:
+            return jsonify({
+                'dry_run': True,
+                'in_send_window': in_window,
+                'channels': NUDGE_CHANNELS,
+                'would_send': [
+                    {'patient_id': a['patient_id'], 'name': a['name'], 'kind': a['kind'],
+                     'days_silent': a['days'], 'never_logged': a['never_logged']}
+                    for a in actions
+                ],
+            }), 200
+
+        if not in_window and not force:
+            return jsonify({'status': 'outside_send_window', 'queued': 0}), 200
+
+        if not actions:
+            return jsonify({'status': 'nothing_to_send', 'queued': 0}), 200
+
+        threading.Thread(target=_execute_nudges, args=(actions,), daemon=True).start()
+        return jsonify({'status': 'started', 'queued': len(actions)}), 202
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
