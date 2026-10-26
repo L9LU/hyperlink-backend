@@ -198,7 +198,7 @@ def followup_done():
         { "doctor_id": "doc456", "patient_id": "abc123", "note": "optional" }
     """
     try:
-        data       = request.get_json()
+        data       = request.get_json(silent=True) or {}
         doctor_id  = data.get('doctor_id')
         patient_id = data.get('patient_id')
 
@@ -215,12 +215,82 @@ def followup_done():
         if patient_doc.to_dict().get('linked_doctor') != doctor_id:
             return jsonify({'error': 'Patient is not linked to this doctor'}), 403
 
+        now_iso = datetime.utcnow().isoformat()
+        note    = (data.get('note') or '').strip()
+
+        # Snooze marker (overwritten each time; used only to quiet the flag)
         patient_ref.update({
-            'last_followup_at':   datetime.utcnow().isoformat(),
-            'last_followup_note': data.get('note', ''),
+            'last_followup_at':   now_iso,
+            'last_followup_note': note,
+        })
+
+        # Permanent log (one document per follow-up) so the pilot can measure
+        # how many flags were followed up, and how quickly.
+        db.collection('followups').add({
+            'patient_id': patient_id,
+            'doctor_id':  doctor_id,
+            'at':         now_iso,
+            'note':       note,
         })
 
         return jsonify({'message': 'Follow-up recorded'}), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ── REVIEW A READING ──────────────────────────────────────────────────────────
+REVIEW_OUTCOMES = {
+    'contacted_patient',
+    'advised_clinic_visit',
+    'medication_changed',
+    'suspected_bad_reading',
+}
+
+
+@doctor_bp.route('/doctor/review-reading', methods=['POST'])
+def review_reading():
+    """
+    Mark a HIGH/CRISIS reading as reviewed, with what the doctor did about it.
+
+    Body:
+        { "doctor_id": "doc456", "patient_id": "abc123",
+          "reading_id": "r789", "outcome": "contacted_patient" }
+    """
+    try:
+        data       = request.get_json(silent=True) or {}
+        doctor_id  = data.get('doctor_id')
+        patient_id = data.get('patient_id')
+        reading_id = data.get('reading_id')
+        outcome    = data.get('outcome')
+
+        if not all([doctor_id, patient_id, reading_id, outcome]):
+            return jsonify({'error': 'doctor_id, patient_id, reading_id and outcome are required'}), 400
+        if outcome not in REVIEW_OUTCOMES:
+            return jsonify({'error': 'Invalid outcome'}), 400
+
+        db = get_db()
+
+        patient_doc = db.collection('users').document(patient_id).get()
+        if not patient_doc.exists:
+            return jsonify({'error': 'Patient not found'}), 404
+        if patient_doc.to_dict().get('linked_doctor') != doctor_id:
+            return jsonify({'error': 'Patient is not linked to this doctor'}), 403
+
+        reading_ref = db.collection('readings').document(reading_id)
+        reading_doc = reading_ref.get()
+        if not reading_doc.exists:
+            return jsonify({'error': 'Reading not found'}), 404
+        if reading_doc.to_dict().get('patient_id') != patient_id:
+            return jsonify({'error': 'Reading does not belong to this patient'}), 403
+
+        reading_ref.update({
+            'reviewed_at':     datetime.utcnow().isoformat(),
+            'reviewed_by':     doctor_id,
+            'review_outcome':  outcome,
+        })
+
+        return jsonify({'message': 'Reading reviewed'}), 200
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -330,10 +400,22 @@ def get_patient_detail(patient_id):
         else:
             stats = {}
 
+        # Past follow-ups for this patient, newest first. Sorted in Python so no
+        # composite Firestore index is needed.
+        followup_docs = (
+            db.collection('followups')
+              .where('patient_id', '==', patient_id)
+              .get()
+        )
+        followups = [{'id': d.id, **d.to_dict()} for d in followup_docs]
+        followups.sort(key=lambda f: f.get('at') or '', reverse=True)
+        followups = followups[:20]
+
         return jsonify({
-            'patient':  patient,
-            'readings': readings,
-            'stats':    stats,
+            'patient':   patient,
+            'readings':  readings,
+            'stats':     stats,
+            'followups': followups,
         }), 200
 
     except Exception as e:
