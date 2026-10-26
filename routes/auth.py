@@ -2,6 +2,7 @@
 # User registration and login
 
 from flask import Blueprint, request, jsonify
+from utils.auth import create_token
 from utils.firebase import get_db
 from utils.notifications import notify_new_verification_request
 from datetime import datetime
@@ -114,7 +115,8 @@ def register():
             'message': 'Registration successful',
             'user_id': user_id,
             'name':    user['name'],
-            'role':    user['role']
+            'role':    user['role'],
+            'token':   create_token(user_id, user['role']),
         }), 201
 
     except Exception as e:
@@ -156,6 +158,7 @@ def login():
             'name':    user_data['name'],
             'role':    user_data['role'],
             'email':   user_data['email'],
+            'token':   create_token(user_doc.id, user_data['role']),
         }
 
         if user_data['role'] in ['doctor', 'pharmacist']:
