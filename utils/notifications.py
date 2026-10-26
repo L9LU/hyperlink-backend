@@ -74,25 +74,36 @@ TWILIO_WHATSAPP_NUMBER = os.environ.get("TWILIO_WHATSAPP_NUMBER")  # e.g. whatsa
 TWILIO_SMS_NUMBER = os.environ.get("TWILIO_SMS_NUMBER")  # e.g. +12025550123 (an SMS-capable Twilio number)
 
 
+def _normalize_phone(phone: str) -> str:
+    """
+    Turn a stored phone number into E.164 ('+2348012345678').
+
+    Numbers that already start with '+' are kept as they are. Numbers saved
+    WITHOUT a country code are assumed to be Nigerian, since that's the pilot
+    market: '08012345678' and '8012345678' both become '+2348012345678', and
+    '2348012345678' becomes '+2348012345678'.
+    """
+    raw = str(phone).strip()
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if raw.startswith("+"):
+        return "+" + digits
+    if digits.startswith("00"):
+        return "+" + digits[2:]
+    if digits.startswith("0") and len(digits) == 11:
+        return "+234" + digits[1:]
+    if len(digits) == 10 and digits[0] in "789":
+        return "+234" + digits
+    return "+" + digits
+
+
 def _format_sms_number(phone: str) -> str:
-    """Normalize a stored phone number into plain E.164: '+2348012345678'."""
-    cleaned = "".join(ch for ch in phone if ch.isdigit() or ch == "+")
-    if not cleaned.startswith("+"):
-        cleaned = "+" + cleaned
-    return cleaned
+    """Plain E.164 for SMS: '+2348012345678'."""
+    return _normalize_phone(phone)
 
 
 def _format_whatsapp_number(phone: str) -> str:
-    """
-    Normalize a stored phone number into Twilio's WhatsApp format:
-    'whatsapp:+2348012345678'
-    Strips spaces/dashes. Assumes the number already includes a country code
-    (as collected at registration, e.g. '+234 123 456 7890').
-    """
-    cleaned = "".join(ch for ch in phone if ch.isdigit() or ch == "+")
-    if not cleaned.startswith("+"):
-        cleaned = "+" + cleaned
-    return f"whatsapp:{cleaned}"
+    """Twilio's WhatsApp format: 'whatsapp:+2348012345678'."""
+    return f"whatsapp:{_normalize_phone(phone)}"
 
 
 def send_whatsapp_message(to_phone: str, body: str):
