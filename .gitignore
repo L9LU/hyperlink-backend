@@ -29,3 +29,5 @@ Thumbs.db
 .idea/
 *.swp
 firebase_credentials.json 
+
+firebase_credentials*
