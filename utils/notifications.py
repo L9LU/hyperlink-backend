@@ -71,6 +71,15 @@ SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
 TWILIO_WHATSAPP_NUMBER = os.environ.get("TWILIO_WHATSAPP_NUMBER")  # e.g. whatsapp:+14155238886
+TWILIO_SMS_NUMBER = os.environ.get("TWILIO_SMS_NUMBER")  # e.g. +12025550123 (an SMS-capable Twilio number)
+
+
+def _format_sms_number(phone: str) -> str:
+    """Normalize a stored phone number into plain E.164: '+2348012345678'."""
+    cleaned = "".join(ch for ch in phone if ch.isdigit() or ch == "+")
+    if not cleaned.startswith("+"):
+        cleaned = "+" + cleaned
+    return cleaned
 
 
 def _format_whatsapp_number(phone: str) -> str:
@@ -94,10 +103,10 @@ def send_whatsapp_message(to_phone: str, body: str):
     """
     if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_NUMBER):
         logger.warning("WhatsApp message skipped — Twilio env vars not fully set.")
-        return
+        return False
     if not to_phone:
         logger.warning("WhatsApp message skipped — recipient has no phone number on file.")
-        return
+        return False
     try:
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         client.messages.create(
@@ -106,8 +115,50 @@ def send_whatsapp_message(to_phone: str, body: str):
             body=body,
         )
         logger.info(f"WhatsApp message sent to {to_phone}.")
+        return True
     except Exception as e:
         logger.error(f"Failed to send WhatsApp message to {to_phone}: {e}")
+        return False
+
+
+def send_sms_message(to_phone: str, body: str):
+    """
+    Send an SMS via Twilio. Best-effort — logs errors, never raises.
+    Returns True if Twilio accepted the message, False otherwise. (Accepted means
+    queued: final delivery to the handset is reported by Twilio later.)
+    """
+    if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_SMS_NUMBER):
+        logger.warning("SMS skipped — Twilio SMS env vars not fully set.")
+        return False
+    if not to_phone:
+        logger.warning("SMS skipped — recipient has no phone number on file.")
+        return False
+    try:
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        client.messages.create(
+            from_=TWILIO_SMS_NUMBER,
+            to=_format_sms_number(to_phone),
+            body=body,
+        )
+        logger.info(f"SMS sent to {to_phone}.")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send SMS to {to_phone}: {e}")
+        return False
+
+
+def send_via_channels(to_phone: str, body: str, channels):
+    """
+    Send the same message on each requested channel ('whatsapp', 'sms').
+    Returns {'whatsapp': True/False, 'sms': True/False} for the channels tried,
+    so callers can tell whether at least one went through.
+    """
+    results = {}
+    if 'whatsapp' in channels:
+        results['whatsapp'] = bool(send_whatsapp_message(to_phone, body))
+    if 'sms' in channels:
+        results['sms'] = bool(send_sms_message(to_phone, body))
+    return results
 
 
 def _send_email(subject: str, body: str):
