@@ -1,7 +1,8 @@
 # routes/doctor.py
 # Doctor dashboard — ranked patient list and patient linking
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, g
+from utils.auth import require_auth
 from utils.firebase import get_db
 from utils.notifications import notify_doctor_verified, send_via_channels
 from datetime import datetime, timedelta, timezone
@@ -55,13 +56,16 @@ def split_ml_fields(p):
 
 # ── GET RANKED PATIENTS ───────────────────────────────────────────────────────
 @doctor_bp.route('/doctor/patients', methods=['GET'])
+@require_auth(roles=['doctor'], verified_doctor=True)
 def get_patients():
     """
-    Get all patients linked to a doctor, ranked by urgency.
+    Get all patients linked to the logged-in doctor, ranked by urgency.
     This powers the doctor's workload priority dashboard.
 
+    The doctor is identified by their login token. Any doctor_id in the query
+    string is ignored.
+
     Query params:
-        doctor_id (required)
         filter    (optional): all | high | crisis | followup
 
     Each patient includes:
@@ -73,11 +77,8 @@ def get_patients():
         ml_risk_level / ml_risk_score   the ML estimate, kept separate
     """
     try:
-        doctor_id = request.args.get('doctor_id')
+        doctor_id = g.user['id']
         filter_by = request.args.get('filter', 'all')
-
-        if not doctor_id:
-            return jsonify({'error': 'doctor_id is required'}), 400
 
         db = get_db()
         now = datetime.utcnow()
@@ -192,22 +193,23 @@ def get_patients():
 
 # ── MARK FOLLOW-UP DONE ───────────────────────────────────────────────────────
 @doctor_bp.route('/doctor/followup-done', methods=['POST'])
+@require_auth(roles=['doctor'], verified_doctor=True)
 def followup_done():
     """
-    Record that the doctor has followed up with a patient. This quiets the
-    follow-up flag for FOLLOWUP_SNOOZE_DAYS. If the patient still hasn't logged
-    by then, the flag comes back.
+    Record that the logged-in doctor has followed up with a patient. This quiets
+    the follow-up flag for FOLLOWUP_SNOOZE_DAYS. If the patient still hasn't
+    logged by then, the flag comes back.
 
     Body:
-        { "doctor_id": "doc456", "patient_id": "abc123", "note": "optional" }
+        { "patient_id": "abc123", "note": "optional" }
     """
     try:
         data       = request.get_json(silent=True) or {}
-        doctor_id  = data.get('doctor_id')
+        doctor_id  = g.user['id']
         patient_id = data.get('patient_id')
 
-        if not doctor_id or not patient_id:
-            return jsonify({'error': 'doctor_id and patient_id are required'}), 400
+        if not patient_id:
+            return jsonify({'error': 'patient_id is required'}), 400
 
         db = get_db()
         patient_ref = db.collection('users').document(patient_id)
@@ -253,23 +255,23 @@ REVIEW_OUTCOMES = {
 
 
 @doctor_bp.route('/doctor/review-reading', methods=['POST'])
+@require_auth(roles=['doctor'], verified_doctor=True)
 def review_reading():
     """
-    Mark a HIGH/CRISIS reading as reviewed, with what the doctor did about it.
+    Mark a HIGH/CRISIS reading as reviewed, with what the logged-in doctor did.
 
     Body:
-        { "doctor_id": "doc456", "patient_id": "abc123",
-          "reading_id": "r789", "outcome": "contacted_patient" }
+        { "patient_id": "abc123", "reading_id": "r789", "outcome": "contacted_patient" }
     """
     try:
         data       = request.get_json(silent=True) or {}
-        doctor_id  = data.get('doctor_id')
+        doctor_id  = g.user['id']
         patient_id = data.get('patient_id')
         reading_id = data.get('reading_id')
         outcome    = data.get('outcome')
 
-        if not all([doctor_id, patient_id, reading_id, outcome]):
-            return jsonify({'error': 'doctor_id, patient_id, reading_id and outcome are required'}), 400
+        if not all([patient_id, reading_id, outcome]):
+            return jsonify({'error': 'patient_id, reading_id and outcome are required'}), 400
         if outcome not in REVIEW_OUTCOMES:
             return jsonify({'error': 'Invalid outcome'}), 400
 
@@ -302,22 +304,31 @@ def review_reading():
 
 # ── LINK PATIENT TO DOCTOR ────────────────────────────────────────────────────
 @doctor_bp.route('/doctor/link-patient', methods=['POST'])
+@require_auth(roles=['patient'])
 def link_patient():
     """
-    Link a patient to a doctor.
+    A logged-in patient links THEMSELVES to a doctor.
 
     Body:
-        { "patient_id": "abc123", "doctor_id": "doc456" }
+        { "doctor_id": "doc456" }
+    (patient_id may still be sent, but it must be the logged-in patient's own id.)
     """
     try:
-        data       = request.get_json()
-        patient_id = data.get('patient_id')
+        data       = request.get_json(silent=True) or {}
+        patient_id = g.user['id']
         doctor_id  = data.get('doctor_id')
 
-        if not patient_id or not doctor_id:
-            return jsonify({'error': 'patient_id and doctor_id are required'}), 400
+        if not doctor_id:
+            return jsonify({'error': 'doctor_id is required'}), 400
+        if data.get('patient_id') and data['patient_id'] != patient_id:
+            return jsonify({'error': 'You can only link your own account'}), 403
 
         db = get_db()
+
+        doctor_doc = db.collection('users').document(doctor_id).get()
+        if not doctor_doc.exists or doctor_doc.to_dict().get('role') != 'doctor':
+            return jsonify({'error': 'Doctor not found'}), 404
+
         db.collection('users').document(patient_id).update({
             'linked_doctor': doctor_id,
             'linked_at':     datetime.utcnow().isoformat(),
@@ -331,23 +342,38 @@ def link_patient():
 
 # ── LINK CAREGIVER ────────────────────────────────────────────────────────────
 @doctor_bp.route('/doctor/link-caregiver', methods=['POST'])
+@require_auth(roles=['patient', 'doctor'])
 def link_caregiver():
     """
-    Link a caregiver/family member to a patient.
+    Link a caregiver/family member to a patient. Allowed for the patient
+    themselves, or for a doctor the patient is linked to.
 
     Body:
         { "patient_id": "abc123", "caregiver_phone": "+2348012345678" }
+    (A patient may leave patient_id out; it defaults to their own id.)
     """
     try:
-        data             = request.get_json()
+        data             = request.get_json(silent=True) or {}
         patient_id       = data.get('patient_id')
         caregiver_phone  = data.get('caregiver_phone')
+
+        if g.user['role'] == 'patient':
+            patient_id = patient_id or g.user['id']
+            if patient_id != g.user['id']:
+                return jsonify({'error': 'You can only change your own caregiver'}), 403
 
         if not patient_id or not caregiver_phone:
             return jsonify({'error': 'patient_id and caregiver_phone are required'}), 400
 
         db = get_db()
-        db.collection('users').document(patient_id).update({
+        patient_ref = db.collection('users').document(patient_id)
+        patient_doc = patient_ref.get()
+        if not patient_doc.exists:
+            return jsonify({'error': 'Patient not found'}), 404
+        if g.user['role'] == 'doctor' and patient_doc.to_dict().get('linked_doctor') != g.user['id']:
+            return jsonify({'error': 'Patient is not linked to this doctor'}), 403
+
+        patient_ref.update({
             'linked_caregiver': caregiver_phone,
         })
 
@@ -359,10 +385,12 @@ def link_caregiver():
 
 # ── GET PATIENT DETAIL (for doctor view) ──────────────────────────────────────
 @doctor_bp.route('/doctor/patient/<patient_id>', methods=['GET'])
+@require_auth(roles=['doctor'], verified_doctor=True)
 def get_patient_detail(patient_id):
     """
     Get full detail of a single patient including last 30 readings.
-    Used when doctor clicks on a patient card.
+    Used when doctor clicks on a patient card. Only the doctor this patient is
+    linked to can open it.
     'risk_level' here matches the dashboard card: the latest MEASURED level.
     """
     try:
@@ -372,6 +400,8 @@ def get_patient_detail(patient_id):
         patient_doc = db.collection('users').document(patient_id).get()
         if not patient_doc.exists:
             return jsonify({'error': 'Patient not found'}), 404
+        if patient_doc.to_dict().get('linked_doctor') != g.user['id']:
+            return jsonify({'error': 'Patient is not linked to this doctor'}), 403
 
         patient = {'id': patient_doc.id, **patient_doc.to_dict()}
         patient.pop('password', None)
