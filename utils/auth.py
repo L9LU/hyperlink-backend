@@ -42,6 +42,26 @@ def _read_token():
     return None
 
 
+def current_user():
+    """
+    Best-effort: the logged-in user from the request's token, as
+    {'id': ..., 'role': ...}, or None. Never rejects the request. For routes that
+    work for anyone but only let a logged-in user do the sensitive part.
+    """
+    if not JWT_SECRET:
+        return None
+    token = _read_token()
+    if not token:
+        return None
+    try:
+        claims = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+    except jwt.InvalidTokenError:  # includes expired
+        return None
+    if not claims.get("sub") or not claims.get("role"):
+        return None
+    return {"id": claims["sub"], "role": claims["role"]}
+
+
 def require_auth(roles=None, verified_doctor=False):
     """
     Protect a route.
