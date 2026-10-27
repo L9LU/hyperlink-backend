@@ -3,6 +3,7 @@
 
 from flask import Blueprint, request, jsonify
 from utils.auth import create_token
+from utils.phone import normalize_phone
 from utils.firebase import get_db
 from utils.notifications import notify_new_verification_request
 from datetime import datetime
@@ -54,7 +55,8 @@ def register():
             'email':      data['email'],
             'password':   hash_password(data['password']),
             'role':       data['role'],
-            'phone':      data.get('phone', ''),
+            # stored in one format (+234...) so doctors can find patients by number
+            'phone':      normalize_phone(data.get('phone', '')),
             'created_at': datetime.utcnow().isoformat(),
         }
 
