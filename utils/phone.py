@@ -16,6 +16,18 @@ def _digits(value) -> str:
     return re.sub(r'\D', '', str(value or ''))
 
 
+def _to_e164(raw: str, digits: str) -> str:
+    if raw.startswith('+'):
+        return '+' + digits
+    if digits.startswith('00'):
+        return '+' + digits[2:]
+    if digits.startswith('0') and len(digits) == 11:
+        return '+234' + digits[1:]
+    if len(digits) == 10 and digits[0] in '789':
+        return '+234' + digits
+    return '+' + digits
+
+
 def normalize_phone(phone) -> str:
     """
     Turn a phone number into E.164 ('+2348012345678'). Returns '' if empty.
@@ -26,20 +38,19 @@ def normalize_phone(phone) -> str:
         '8012345678'     -> '+2348012345678'
         '2348012345678'  -> '+2348012345678'
         '+234 801 234 5678' -> '+2348012345678'
+        '+234 0801 234 5678' -> '+2348012345678'  (local leading 0 kept by mistake)
     """
     raw = str(phone or '').strip()
     digits = _digits(raw)
     if not digits:
         return ''
-    if raw.startswith('+'):
-        return '+' + digits
-    if digits.startswith('00'):
-        return '+' + digits[2:]
-    if digits.startswith('0') and len(digits) == 11:
-        return '+234' + digits[1:]
-    if len(digits) == 10 and digits[0] in '789':
-        return '+234' + digits
-    return '+' + digits
+    e164 = _to_e164(raw, digits)
+    # People often write "+234 0812 ..." or "+234 (0) 812 ...", keeping the local
+    # leading 0 after the country code. A real +234 number has 10 digits after
+    # it, so the extra 0 is dropped.
+    if e164.startswith('+2340') and len(e164) == 15:
+        e164 = '+234' + e164[5:]
+    return e164
 
 
 def phone_variants(phone) -> list:
