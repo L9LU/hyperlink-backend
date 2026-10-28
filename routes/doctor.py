@@ -1,181 +1,70 @@
-# routes/auth.py
-# User registration and login
+import apiClient from './client';
 
-from flask import Blueprint, request, jsonify
-from utils.auth import create_token
-from utils.phone import normalize_phone
-from utils.firebase import get_db
-from utils.notifications import notify_new_verification_request
-from datetime import datetime
-import hashlib
-import bcrypt
-import os
+export const linkPatient = async (linkData) => {
+  const response = await apiClient.post('/doctor/link-patient', linkData);
+  return response.data;
+};
 
-auth_bp = Blueprint('auth', __name__)
+export const getDoctorPatients = async (doctorId) => {
+  const response = await apiClient.get(`/doctor/patients?doctor_id=${doctorId}`);
+  return response.data;
+};
 
-def hash_password(password: str) -> str:
-    """Hash a password with bcrypt. Returns a string safe to store in Firestore."""
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+export const getPatientDetail = async (patientId, doctorId) => {
+  const response = await apiClient.get(`/doctor/patient/${patientId}?doctor_id=${doctorId}`);
+  return response.data;
+};
 
-def verify_password(password: str, stored_hash: str) -> bool:
-    """
-    Verify a password against a stored hash.
-    Supports both new bcrypt hashes and legacy SHA-256 hashes for backward compatibility.
-    """
-    # bcrypt hashes always start with $2b$, $2a$, or $2y$
-    if stored_hash.startswith(('$2b$', '$2a$', '$2y$')):
-        return bcrypt.checkpw(password.encode(), stored_hash.encode())
-    else:
-        # Legacy SHA-256 hash — old accounts created before this fix
-        legacy_hash = hashlib.sha256(password.encode()).hexdigest()
-        return legacy_hash == stored_hash
+export const markFollowupDone = async ({ doctor_id, patient_id, note }) => {
+  const response = await apiClient.post('/doctor/followup-done', { doctor_id, patient_id, note });
+  return response.data;
+};
 
-# ── REGISTER ──────────────────────────────────────────────────────────────────
-@auth_bp.route('/auth/register', methods=['POST'])
-def register():
-    try:
-        data = request.get_json()
+export const reviewReading = async ({ doctor_id, patient_id, reading_id, outcome }) => {
+  const response = await apiClient.post('/doctor/review-reading', {
+    doctor_id,
+    patient_id,
+    reading_id,
+    outcome,
+  });
+  return response.data;
+};
 
-        required = ['name', 'email', 'password', 'role']
-        for field in required:
-            if not data.get(field):
-                return jsonify({'error': f'{field} is required'}), 400
+// ── Doctor-initiated linking: the doctor searches, sends a request, the patient accepts ──
 
-        if data['role'] not in ['patient', 'doctor', 'pharmacist']:
-            return jsonify({'error': 'role must be patient, doctor, or pharmacist'}), 400
+// Find a patient by their exact phone number or email.
+export const searchPatient = async (query) => {
+  const response = await apiClient.post('/doctor/search-patient', { query });
+  return response.data;
+};
 
-        db = get_db()
+export const sendLinkRequest = async (patientId) => {
+  const response = await apiClient.post('/doctor/link-requests', { patient_id: patientId });
+  return response.data;
+};
 
-        existing = db.collection('users').where('email', '==', data['email']).get()
-        if existing:
-            return jsonify({'error': 'Email already registered'}), 409
+export const getDoctorLinkRequests = async () => {
+  const response = await apiClient.get('/doctor/link-requests');
+  return response.data;
+};
 
-        user = {
-            'name':       data['name'],
-            'email':      data['email'],
-            'password':   hash_password(data['password']),
-            'role':       data['role'],
-            # stored in one format (+234...) so doctors can find patients by number
-            'phone':      normalize_phone(data.get('phone', '')),
-            'created_at': datetime.utcnow().isoformat(),
-        }
+export const cancelLinkRequest = async (requestId) => {
+  const response = await apiClient.post(`/doctor/link-requests/${requestId}/cancel`);
+  return response.data;
+};
 
-        if data['role'] == 'patient':
-            user.update({
-                'age':            data.get('age'),
-                'bmi':            data.get('bmi'),
-                'family_history': data.get('family_history', 'No'),
-                'exercise_level': data.get('exercise_level', 'Moderate'),
-                'smoking_status': data.get('smoking_status', 'Non-Smoker'),
-                'bp_history':     data.get('bp_history', 'Normal'),
-                'medication':     data.get('medication', 'None'),
-                'linked_doctor':  None,
-                'linked_caregiver': None,
-                'risk_score':     None,
-            })
+// Patient side (used by the patient screens)
+export const getPatientLinkRequests = async () => {
+  const response = await apiClient.get('/patient/link-requests');
+  return response.data;
+};
 
-        if data['role'] == 'doctor':
-            user.update({
-                'hospital':        data.get('hospital', ''),
-                'specialty':       data.get('specialty', ''),
-                'department':      data.get('department', ''),
-                'license_number':  data.get('license_number', ''),
-                'verified':        False,
-            })
+export const respondToLinkRequest = async (requestId, accept) => {
+  const response = await apiClient.post(`/patient/link-requests/${requestId}/respond`, { accept });
+  return response.data;
+};
 
-        if data['role'] == 'pharmacist':
-            user.update({
-                'pharmacy_name':    data.get('pharmacy_name', ''),
-                'pharmacy_address': data.get('pharmacy_address', ''),
-                'license_number':   data.get('license_number', ''),
-                'verified':         False,
-            })
-
-        doc_ref = db.collection('users').document()
-        doc_ref.set(user)
-        user_id = doc_ref.id
-
-        if data['role'] == 'doctor':
-            notify_new_verification_request(
-                role='doctor',
-                email=data['email'],
-                name=data['name'],
-                license_number=data.get('license_number', ''),
-                extra_info=f"Hospital: {data.get('hospital', '')}, Specialty: {data.get('specialty', '')}"
-            )
-
-        if data['role'] == 'pharmacist':
-            notify_new_verification_request(
-                role='pharmacist',
-                email=data['email'],
-                name=data['name'],
-                license_number=data.get('license_number', ''),
-                extra_info=f"Pharmacy: {data.get('pharmacy_name', '')}"
-            )
-
-        return jsonify({
-            'message': 'Registration successful',
-            'user_id': user_id,
-            'name':    user['name'],
-            'role':    user['role'],
-            'token':   create_token(user_id, user['role']),
-        }), 201
-
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-# ── LOGIN ─────────────────────────────────────────────────────────────────────
-@auth_bp.route('/auth/login', methods=['POST'])
-def login():
-    try:
-        data = request.get_json()
-        email    = data.get('email')
-        password = data.get('password')
-
-        if not email or not password:
-            return jsonify({'error': 'Email and password are required'}), 400
-
-        db = get_db()
-        users = db.collection('users').where('email', '==', email).get()
-
-        if not users:
-            return jsonify({'error': 'Invalid email or password'}), 401
-
-        user_doc  = users[0]
-        user_data = user_doc.to_dict()
-
-        if not verify_password(password, user_data['password']):
-            return jsonify({'error': 'Invalid email or password'}), 401
-
-        # Lazy migration: if this account still has an old SHA-256 hash, upgrade it to bcrypt now
-        if not user_data['password'].startswith(('$2b$', '$2a$', '$2y$')):
-            db.collection('users').document(user_doc.id).update({
-                'password': hash_password(password)
-            })
-
-        response = {
-            'message': 'Login successful',
-            'user_id': user_doc.id,
-            'name':    user_data['name'],
-            'role':    user_data['role'],
-            'email':   user_data['email'],
-            'token':   create_token(user_doc.id, user_data['role']),
-        }
-
-        if user_data['role'] in ['doctor', 'pharmacist']:
-            response['verified'] = user_data.get('verified', False)
-
-        if user_data['role'] == 'patient':
-            response['age']             = user_data.get('age')
-            response['bmi']             = user_data.get('bmi')
-            response['family_history']  = user_data.get('family_history')
-            response['exercise_level']  = user_data.get('exercise_level')
-            response['smoking_status']  = user_data.get('smoking_status')
-            response['bp_history']      = user_data.get('bp_history')
-            response['medication']      = user_data.get('medication')
-
-        return jsonify(response), 200
-
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+export const unlinkDoctor = async () => {
+  const response = await apiClient.post('/patient/unlink-doctor');
+  return response.data;
+};
