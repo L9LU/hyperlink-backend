@@ -10,6 +10,7 @@ from datetime import datetime
 import hashlib
 import bcrypt
 import os
+import re
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -30,29 +31,60 @@ def verify_password(password: str, stored_hash: str) -> bool:
         legacy_hash = hashlib.sha256(password.encode()).hexdigest()
         return legacy_hash == stored_hash
 
+EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+MIN_PASSWORD_LENGTH = 8
+
+
+def phone_error(phone_raw):
+    """Return a plain-English problem with this phone number, or None if it is usable."""
+    e164 = normalize_phone(phone_raw)
+    if not e164:
+        return 'Phone number is required so your doctor can reach you'
+    digits = re.sub(r'\D', '', e164)
+    if not 10 <= len(digits) <= 15:
+        return 'Enter a valid phone number, e.g. 0801 234 5678 or +234 801 234 5678'
+    if e164.startswith('+234') and len(digits) != 13:
+        return 'That Nigerian number looks too short or too long. Check it and try again'
+    return None
+
+
 # ── REGISTER ──────────────────────────────────────────────────────────────────
 @auth_bp.route('/auth/register', methods=['POST'])
 def register():
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
 
         required = ['name', 'email', 'password', 'role']
         for field in required:
-            if not data.get(field):
+            if not str(data.get(field) or '').strip():
                 return jsonify({'error': f'{field} is required'}), 400
 
         if data['role'] not in ['patient', 'doctor', 'pharmacist']:
             return jsonify({'error': 'role must be patient, doctor, or pharmacist'}), 400
 
+        email = str(data['email']).strip().lower()
+        if not EMAIL_RE.match(email):
+            return jsonify({'error': 'Enter a valid email address'}), 400
+
+        if len(str(data['password'])) < MIN_PASSWORD_LENGTH:
+            return jsonify({'error': f'Password must be at least {MIN_PASSWORD_LENGTH} characters'}), 400
+
+        # Patients must give a phone number: it is how doctors find them and how
+        # reminders reach them. Other roles may skip it, but if given it must be valid.
+        if data['role'] == 'patient' or str(data.get('phone') or '').strip():
+            problem = phone_error(data.get('phone'))
+            if problem:
+                return jsonify({'error': problem}), 400
+
         db = get_db()
 
-        existing = db.collection('users').where('email', '==', data['email']).get()
+        existing = db.collection('users').where('email', '==', email).get()
         if existing:
             return jsonify({'error': 'Email already registered'}), 409
 
         user = {
             'name':       data['name'],
-            'email':      data['email'],
+            'email':      email,
             'password':   hash_password(data['password']),
             'role':       data['role'],
             # stored in one format (+234...) so doctors can find patients by number
@@ -98,7 +130,7 @@ def register():
         if data['role'] == 'doctor':
             notify_new_verification_request(
                 role='doctor',
-                email=data['email'],
+                email=email,
                 name=data['name'],
                 license_number=data.get('license_number', ''),
                 extra_info=f"Hospital: {data.get('hospital', '')}, Specialty: {data.get('specialty', '')}"
@@ -107,7 +139,7 @@ def register():
         if data['role'] == 'pharmacist':
             notify_new_verification_request(
                 role='pharmacist',
-                email=data['email'],
+                email=email,
                 name=data['name'],
                 license_number=data.get('license_number', ''),
                 extra_info=f"Pharmacy: {data.get('pharmacy_name', '')}"
@@ -129,15 +161,19 @@ def register():
 @auth_bp.route('/auth/login', methods=['POST'])
 def login():
     try:
-        data = request.get_json()
-        email    = data.get('email')
+        data = request.get_json(silent=True) or {}
+        email    = str(data.get('email') or '').strip()
         password = data.get('password')
 
         if not email or not password:
             return jsonify({'error': 'Email and password are required'}), 400
 
         db = get_db()
-        users = db.collection('users').where('email', '==', email).get()
+        # New accounts store lowercase emails; try the lowercase form first, then
+        # exactly as typed, so accounts created before this change still log in.
+        users = db.collection('users').where('email', '==', email.lower()).get()
+        if not users and email != email.lower():
+            users = db.collection('users').where('email', '==', email).get()
 
         if not users:
             return jsonify({'error': 'Invalid email or password'}), 401
