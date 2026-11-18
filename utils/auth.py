@@ -14,7 +14,11 @@ from flask import g, jsonify, request
 from utils.firebase import get_db
 
 JWT_SECRET = os.environ.get("JWT_SECRET")
+# Doctors and pharmacists see many patients, so their sign-in is short.
 JWT_EXPIRY_HOURS = int(os.getenv("JWT_EXPIRY_HOURS", 12))
+# Patients only reach their own data, and sign in on their own phones, so theirs is
+# longer (7 days by default) to keep daily logging easy.
+PATIENT_JWT_EXPIRY_HOURS = int(os.getenv("PATIENT_JWT_EXPIRY_HOURS", 168))
 
 # Doctors whose MDCN check hasn't been approved yet can log in but can't open
 # patient data. Set REQUIRE_VERIFIED_DOCTORS=false to switch this off.
@@ -30,7 +34,7 @@ def create_token(user_id: str, role: str) -> str:
         "sub":  user_id,
         "role": role,
         "iat":  now,
-        "exp":  now + timedelta(hours=JWT_EXPIRY_HOURS),
+        "exp":  now + timedelta(hours=PATIENT_JWT_EXPIRY_HOURS if role == "patient" else JWT_EXPIRY_HOURS),
     }
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
