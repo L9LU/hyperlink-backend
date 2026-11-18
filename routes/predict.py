@@ -3,6 +3,7 @@
 
 from flask import Blueprint, request, jsonify
 from utils.auth import current_user, require_auth
+from utils.errors import server_error
 from utils.model import predict_risk
 from utils.firebase import get_db
 from datetime import datetime
@@ -118,7 +119,7 @@ def predict():
         return jsonify(result), 200
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
 
 
 # ── BATCH PREDICT (for doctor dashboard) ─────────────────────────────────────
@@ -160,4 +161,4 @@ def predict_batch():
         }), 200
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
