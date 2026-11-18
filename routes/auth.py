@@ -38,6 +38,26 @@ def verify_password(password: str, stored_hash: str) -> bool:
 LANGUAGES = {'en': 'English', 'yo': 'Yoruba', 'ig': 'Igbo', 'ha': 'Hausa', 'pcm': 'Pidgin'}
 DEFAULT_LANGUAGE = 'en'
 
+# Hospital units a doctor can belong to. A doctor picks one at registration; it becomes
+# the "primary unit" of the patients they enrol. Keep the codes in sync with
+# src/constants/units.js in the frontend.
+UNITS = {
+    'cardiology':      'Cardiology',
+    'internal_medicine': 'Internal Medicine',
+    'family_medicine': 'Family Medicine / General Outpatients',
+    'nephrology':      'Nephrology',
+    'endocrinology':   'Endocrinology',
+    'neurology':       'Neurology',
+    'emergency':       'Emergency',
+    'geriatrics':      'Geriatrics',
+    'other':           'Other',
+}
+
+# While the new doctor sign-up form is not live yet, leave this unset (false) so the
+# old form keeps working. Once the new form is published, set STRICT_DOCTOR_SIGNUP=true
+# in Render: doctors must then give phone, licence number, hospital and unit.
+STRICT_DOCTOR_SIGNUP = os.getenv('STRICT_DOCTOR_SIGNUP', 'false').lower() in ('1', 'true', 'yes')
+
 EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 MIN_PASSWORD_LENGTH = 8
 
@@ -114,11 +134,26 @@ def register():
             return jsonify({'error': f'Password must be at least {MIN_PASSWORD_LENGTH} characters'}), 400
 
         # Patients must give a phone number: it is how doctors find them and how
-        # reminders reach them. Other roles may skip it, but if given it must be valid.
-        if data['role'] == 'patient' or str(data.get('phone') or '').strip():
+        # reminders reach them. Doctors need one too (crisis alerts go to it) once
+        # STRICT_DOCTOR_SIGNUP is on. Anyone else may skip it, but if given it must be valid.
+        needs_phone = data['role'] == 'patient' or (data['role'] == 'doctor' and STRICT_DOCTOR_SIGNUP)
+        if needs_phone or str(data.get('phone') or '').strip():
             problem = phone_error(data.get('phone'))
             if problem:
                 return jsonify({'error': problem}), 400
+
+        unit = str(data.get('unit') or '').strip().lower()
+        hospital = ' '.join(str(data.get('hospital') or '').split())[:120]  # trim, collapse spaces
+        if data['role'] == 'doctor':
+            if unit and unit not in UNITS:
+                return jsonify({'error': 'Choose a unit from the list'}), 400
+            if STRICT_DOCTOR_SIGNUP:
+                if not str(data.get('license_number') or '').strip():
+                    return jsonify({'error': 'Medical licence number is required'}), 400
+                if not hospital:
+                    return jsonify({'error': 'Hospital is required'}), 400
+                if not unit:
+                    return jsonify({'error': 'Choose your unit from the list'}), 400
 
         language = str(data.get('language') or DEFAULT_LANGUAGE).strip().lower()
         if language not in LANGUAGES:
@@ -157,9 +192,11 @@ def register():
 
         if data['role'] == 'doctor':
             user.update({
-                'hospital':        data.get('hospital', ''),
+                'hospital':        hospital,
                 'specialty':       data.get('specialty', ''),
-                'department':      data.get('department', ''),
+                'unit':            unit,
+                # older screens read `department`, so keep it filled with the unit's name
+                'department':      UNITS.get(unit) or data.get('department', ''),
                 'license_number':  data.get('license_number', ''),
                 'verified':        False,
             })
@@ -182,7 +219,7 @@ def register():
                 email=email,
                 name=data['name'],
                 license_number=data.get('license_number', ''),
-                extra_info=f"Hospital: {data.get('hospital', '')}, Specialty: {data.get('specialty', '')}"
+                extra_info=f"Hospital: {hospital}, Unit: {UNITS.get(unit) or data.get('department', '')}, Specialty: {data.get('specialty', '')}"
             )
 
         if data['role'] == 'pharmacist':
