@@ -3,6 +3,7 @@
 
 from flask import Blueprint, request, jsonify, g
 from utils.auth import require_auth
+from utils.errors import server_error
 from utils.phone import phone_variants, mask_phone, mask_email, display_name
 from utils.firebase import get_db
 from utils.notifications import notify_doctor_verified, send_via_channels
@@ -189,7 +190,7 @@ def get_patients():
         }), 200
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
 
 
 # ── MARK FOLLOW-UP DONE ───────────────────────────────────────────────────────
@@ -243,7 +244,7 @@ def followup_done():
         return jsonify({'message': 'Follow-up recorded'}), 200
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
 
 
 # ── REVIEW A READING ──────────────────────────────────────────────────────────
@@ -300,7 +301,7 @@ def review_reading():
         return jsonify({'message': 'Reading reviewed'}), 200
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
 
 
 # ── LINK PATIENT TO DOCTOR ────────────────────────────────────────────────────
@@ -344,7 +345,7 @@ def link_patient():
         return jsonify({'message': 'Patient linked to doctor successfully'}), 200
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
 
 
 # ── DOCTOR-INITIATED LINKING (doctor sends a request, patient accepts) ────────
@@ -464,7 +465,7 @@ def search_patient():
         }), 200
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
 
 
 @doctor_bp.route('/doctor/link-requests', methods=['POST'])
@@ -514,7 +515,7 @@ def create_link_request():
         return jsonify({'message': 'Request sent', 'request_id': ref.id}), 201
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
 
 
 @doctor_bp.route('/doctor/link-requests', methods=['GET'])
@@ -541,7 +542,7 @@ def list_doctor_link_requests():
         return jsonify({'requests': out}), 200
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
 
 
 @doctor_bp.route('/doctor/link-requests/<request_id>/cancel', methods=['POST'])
@@ -559,7 +560,7 @@ def cancel_link_request(request_id):
         ref.update({'status': 'cancelled', 'responded_at': datetime.utcnow().isoformat()})
         return jsonify({'message': 'Request cancelled'}), 200
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
 
 
 # ── PATIENT SIDE: SEE REQUESTS, ACCEPT OR DECLINE, UNLINK ─────────────────────
@@ -603,7 +604,7 @@ def list_patient_link_requests():
         return jsonify({'linked_doctor': linked, 'requests': requests_out}), 200
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
 
 
 @doctor_bp.route('/patient/link-requests/<request_id>/respond', methods=['POST'])
@@ -653,7 +654,7 @@ def respond_to_link_request(request_id):
         return jsonify({'message': 'Connected'}), 200
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
 
 
 @doctor_bp.route('/patient/unlink-doctor', methods=['POST'])
@@ -672,7 +673,7 @@ def unlink_doctor():
         _log_link_event(db, 'unlinked', me, old)
         return jsonify({'message': 'Disconnected'}), 200
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
 
 
 # ── LINK CAREGIVER ────────────────────────────────────────────────────────────
@@ -715,7 +716,7 @@ def link_caregiver():
         return jsonify({'message': 'Caregiver linked successfully'}), 200
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
 
 
 # ── GET PATIENT DETAIL (for doctor view) ──────────────────────────────────────
@@ -788,7 +789,7 @@ def get_patient_detail(patient_id):
         }), 200
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
 
 
 # ── PATIENT & CAREGIVER NUDGES ────────────────────────────────────────────────
@@ -996,7 +997,7 @@ def send_nudges():
         return jsonify({'status': 'started', 'queued': len(actions)}), 202
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
 
 
 # ── APPROVE DOCTOR/PHARMACIST VERIFICATION ────────────────────────────────────
@@ -1041,4 +1042,4 @@ def approve_user():
         return jsonify({'message': f"{user_data.get('name')} has been verified"}), 200
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
