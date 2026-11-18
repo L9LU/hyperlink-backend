@@ -5,6 +5,7 @@
 
 from flask import Blueprint, request, jsonify, g
 from utils.auth import require_auth
+from utils.errors import server_error
 from utils.firebase import get_db
 
 alerts_bp = Blueprint('alerts', __name__)
@@ -97,4 +98,4 @@ def alert_history():
         }), 200
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
