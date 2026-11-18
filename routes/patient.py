@@ -3,6 +3,7 @@
 
 from flask import Blueprint, request, jsonify, g
 from utils.auth import require_auth
+from utils.errors import server_error
 from utils.firebase import get_db
 
 patient_bp = Blueprint('patient', __name__)
@@ -71,4 +72,4 @@ def update_measurements():
         return jsonify({'bmi': bmi}), 200
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
