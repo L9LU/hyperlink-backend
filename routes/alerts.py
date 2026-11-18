@@ -10,6 +10,7 @@ from utils.firebase import get_db
 alerts_bp = Blueprint('alerts', __name__)
 
 MAX_HISTORY_LIMIT = 100
+MAX_ALERTS_READ = 500   # newest-first sorting is done in Python, so cap what we read
 
 
 # ── FIRE ALERT (RETIRED) ──────────────────────────────────────────────────────
@@ -66,11 +67,13 @@ def alert_history():
             if patient_doc.to_dict().get('linked_doctor') != g.user['id']:
                 return jsonify({'error': 'Patient is not linked to this doctor'}), 403
 
+        # A where() on one field plus order_by() on another needs a Firestore
+        # composite index, and the request fails with a 500 until one is created.
+        # So fetch by patient only and sort newest-first here instead.
         docs = (
             db.collection('alerts')
               .where('patient_id', '==', patient_id)
-              .order_by('timestamp', direction='DESCENDING')
-              .limit(limit)
+              .limit(MAX_ALERTS_READ)
               .get()
         )
 
@@ -83,6 +86,9 @@ def alert_history():
                 for f in (a.get('alerts_fired') or [])
             ]
             alerts.append(a)
+
+        alerts.sort(key=lambda a: str(a.get('timestamp') or ''), reverse=True)
+        alerts = alerts[:limit]
 
         return jsonify({
             'patient_id': patient_id,
