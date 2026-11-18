@@ -1,8 +1,9 @@
 # routes/auth.py
 # User registration and login
 
-from flask import Blueprint, request, jsonify
-from utils.auth import create_token
+from flask import Blueprint, request, jsonify, g
+from utils.auth import create_token, require_auth
+from utils.errors import server_error
 from utils.phone import normalize_phone
 from utils.firebase import get_db
 from utils.notifications import notify_new_verification_request
@@ -11,6 +12,8 @@ import hashlib
 import bcrypt
 import os
 import re
+import time
+from collections import defaultdict, deque
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -31,6 +34,10 @@ def verify_password(password: str, stored_hash: str) -> bool:
         legacy_hash = hashlib.sha256(password.encode()).hexdigest()
         return legacy_hash == stored_hash
 
+# Languages the care assistant can speak. The patient picks; we never guess from a name.
+LANGUAGES = {'en': 'English', 'yo': 'Yoruba', 'ig': 'Igbo', 'ha': 'Hausa', 'pcm': 'Pidgin'}
+DEFAULT_LANGUAGE = 'en'
+
 EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 MIN_PASSWORD_LENGTH = 8
 
@@ -46,6 +53,43 @@ def phone_error(phone_raw):
     if e164.startswith('+234') and len(digits) != 13:
         return 'That Nigerian number looks too short or too long. Check it and try again'
     return None
+
+
+# ── LOGIN ATTEMPT LIMIT ───────────────────────────────────────────────────────
+# After LOGIN_MAX_FAILURES wrong passwords for the same email from the same
+# connection within LOGIN_WINDOW_SECONDS, further tries are refused until the
+# window passes. Kept in memory: it resets when the server restarts, and each
+# server process counts separately. That is enough to stop someone guessing
+# thousands of passwords, which is the aim for the pilot.
+LOGIN_MAX_FAILURES = 5
+LOGIN_WINDOW_SECONDS = 15 * 60
+_login_failures = defaultdict(deque)
+
+
+def _client_ip():
+    # Behind Render's proxy the real address is the last X-Forwarded-For entry
+    # (the proxy adds it; earlier entries can be faked by the caller).
+    forwarded = request.headers.get('X-Forwarded-For', '')
+    ip = forwarded.split(',')[-1].strip() if forwarded else request.remote_addr
+    return ip or 'unknown'
+
+
+def _login_key(email):
+    return f"{email.strip().lower()}|{_client_ip()}"
+
+
+def _recent_failures(key):
+    q = _login_failures[key]
+    cutoff = time.time() - LOGIN_WINDOW_SECONDS
+    while q and q[0] < cutoff:
+        q.popleft()
+    if not q:
+        _login_failures.pop(key, None)
+    return len(q)
+
+
+def _too_many_failures(key):
+    return _recent_failures(key) >= LOGIN_MAX_FAILURES
 
 
 # ── REGISTER ──────────────────────────────────────────────────────────────────
@@ -76,6 +120,10 @@ def register():
             if problem:
                 return jsonify({'error': problem}), 400
 
+        language = str(data.get('language') or DEFAULT_LANGUAGE).strip().lower()
+        if language not in LANGUAGES:
+            return jsonify({'error': 'Choose a language from the list'}), 400
+
         db = get_db()
 
         existing = db.collection('users').where('email', '==', email).get()
@@ -101,6 +149,7 @@ def register():
                 'smoking_status': data.get('smoking_status', 'Non-Smoker'),
                 'bp_history':     data.get('bp_history', 'Normal'),
                 'medication':     data.get('medication', 'None'),
+                'language':       language,
                 'linked_doctor':  None,
                 'linked_caregiver': None,
                 'risk_score':     None,
@@ -154,7 +203,7 @@ def register():
         }), 201
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
 
 
 # ── LOGIN ─────────────────────────────────────────────────────────────────────
@@ -168,6 +217,10 @@ def login():
         if not email or not password:
             return jsonify({'error': 'Email and password are required'}), 400
 
+        attempt_key = _login_key(email)
+        if _too_many_failures(attempt_key):
+            return jsonify({'error': 'Too many failed attempts. Please wait 15 minutes and try again.'}), 429
+
         db = get_db()
         # New accounts store lowercase emails; try the lowercase form first, then
         # exactly as typed, so accounts created before this change still log in.
@@ -176,13 +229,17 @@ def login():
             users = db.collection('users').where('email', '==', email).get()
 
         if not users:
+            _login_failures[attempt_key].append(time.time())
             return jsonify({'error': 'Invalid email or password'}), 401
 
         user_doc  = users[0]
         user_data = user_doc.to_dict()
 
         if not verify_password(password, user_data['password']):
+            _login_failures[attempt_key].append(time.time())
             return jsonify({'error': 'Invalid email or password'}), 401
+
+        _login_failures.pop(attempt_key, None)  # a good login clears the count
 
         # Lazy migration: if this account still has an old SHA-256 hash, upgrade it to bcrypt now
         if not user_data['password'].startswith(('$2b$', '$2a$', '$2y$')):
@@ -210,8 +267,27 @@ def login():
             response['smoking_status']  = user_data.get('smoking_status')
             response['bp_history']      = user_data.get('bp_history')
             response['medication']      = user_data.get('medication')
+            response['language']        = user_data.get('language', DEFAULT_LANGUAGE)
 
         return jsonify(response), 200
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
+
+
+# ── CHANGE LANGUAGE (patient, for themselves only) ───────────────────────────
+@auth_bp.route('/auth/language', methods=['POST'])
+@require_auth(roles=['patient'])
+def set_language():
+    try:
+        data = request.get_json(silent=True) or {}
+        language = str(data.get('language') or '').strip().lower()
+        if language not in LANGUAGES:
+            return jsonify({'error': 'Choose a language from the list'}), 400
+
+        # The patient comes from the login token, never from the request body.
+        get_db().collection('users').document(g.user['id']).update({'language': language})
+        return jsonify({'language': language, 'label': LANGUAGES[language]}), 200
+
+    except Exception as e:
+        return server_error(e)
