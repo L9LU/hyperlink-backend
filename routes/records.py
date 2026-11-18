@@ -3,6 +3,7 @@
 
 from flask import Blueprint, request, jsonify, g
 from utils.auth import require_auth
+from utils.errors import server_error
 from utils.firebase import get_db
 from utils.bp import classify_bp
 from utils.notifications import notify_patient_high_reading, notify_doctor_crisis_patient
@@ -170,7 +171,7 @@ def log_reading():
         }), 201
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
 
 
 # ── GET READING HISTORY ───────────────────────────────────────────────────────
@@ -244,7 +245,7 @@ def get_history():
         }), 200
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
 
 
 # ── BULK LOG (for offline sync) ───────────────────────────────────────────────
@@ -339,4 +340,4 @@ def bulk_log():
         }), status
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return server_error(e)
