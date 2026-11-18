@@ -58,6 +58,15 @@ UNITS = {
 # in Render: doctors must then give phone, licence number, hospital and unit.
 STRICT_DOCTOR_SIGNUP = os.getenv('STRICT_DOCTOR_SIGNUP', 'false').lower() in ('1', 'true', 'yes')
 
+# The version of the privacy and consent text patients agree to. Change it whenever the
+# wording changes in a way patients should see again; everyone is then asked once more.
+# Keep it in sync with CONSENT_VERSION in src/constants/consent.js in the frontend.
+CONSENT_VERSION = '2026-11-v1'
+
+# Leave unset (false) until the new sign-up page is live. Then set it to true in Render:
+# a patient cannot register without accepting the current consent text.
+REQUIRE_PATIENT_CONSENT = os.getenv('REQUIRE_PATIENT_CONSENT', 'false').lower() in ('1', 'true', 'yes')
+
 EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 MIN_PASSWORD_LENGTH = 8
 
@@ -112,6 +121,17 @@ def _too_many_failures(key):
     return _recent_failures(key) >= LOGIN_MAX_FAILURES
 
 
+def _log_consent(db, user_id, version, action, source):
+    """Keep a permanent record of who accepted which text, and when."""
+    db.collection('consent_events').document().set({
+        'user_id':   user_id,
+        'version':   version,
+        'action':    action,
+        'source':    source,
+        'at':        datetime.utcnow().isoformat(),
+    })
+
+
 # ── REGISTER ──────────────────────────────────────────────────────────────────
 @auth_bp.route('/auth/register', methods=['POST'])
 def register():
@@ -159,6 +179,14 @@ def register():
         if language not in LANGUAGES:
             return jsonify({'error': 'Choose a language from the list'}), 400
 
+        # Patients accept the privacy and consent text when they register.
+        consent_version = str(data.get('consent_version') or '').strip()
+        if data['role'] == 'patient':
+            if not consent_version and REQUIRE_PATIENT_CONSENT:
+                return jsonify({'error': 'Please read and accept the privacy and consent terms'}), 400
+            if consent_version and consent_version != CONSENT_VERSION:
+                return jsonify({'error': 'The consent terms have been updated. Please refresh the page and read them again'}), 409
+
         db = get_db()
 
         existing = db.collection('users').where('email', '==', email).get()
@@ -185,6 +213,8 @@ def register():
                 'bp_history':     data.get('bp_history', 'Normal'),
                 'medication':     data.get('medication', 'None'),
                 'language':       language,
+                'consent':        ({'version': consent_version, 'accepted_at': datetime.utcnow().isoformat()}
+                                   if consent_version else None),
                 'linked_doctor':  None,
                 'linked_caregiver': None,
                 'risk_score':     None,
@@ -212,6 +242,9 @@ def register():
         doc_ref = db.collection('users').document()
         doc_ref.set(user)
         user_id = doc_ref.id
+
+        if data['role'] == 'patient' and consent_version:
+            _log_consent(db, user_id, consent_version, 'accepted', 'register')
 
         if data['role'] == 'doctor':
             notify_new_verification_request(
@@ -305,6 +338,7 @@ def login():
             response['bp_history']      = user_data.get('bp_history')
             response['medication']      = user_data.get('medication')
             response['language']        = user_data.get('language', DEFAULT_LANGUAGE)
+            response['consent_version'] = (user_data.get('consent') or {}).get('version')
 
         return jsonify(response), 200
 
@@ -326,5 +360,42 @@ def set_language():
         get_db().collection('users').document(g.user['id']).update({'language': language})
         return jsonify({'language': language, 'label': LANGUAGES[language]}), 200
 
+    except Exception as e:
+        return server_error(e)
+
+
+# ── CONSENT (patient, for themselves only) ───────────────────────────────────
+@auth_bp.route('/auth/consent', methods=['GET'])
+@require_auth(roles=['patient'])
+def get_consent():
+    try:
+        doc = get_db().collection('users').document(g.user['id']).get()
+        consent = (doc.to_dict() or {}).get('consent') or {} if doc.exists else {}
+        return jsonify({
+            'current_version':  CONSENT_VERSION,
+            'accepted_version': consent.get('version'),
+            'accepted_at':      consent.get('accepted_at'),
+        }), 200
+    except Exception as e:
+        return server_error(e)
+
+
+@auth_bp.route('/auth/consent', methods=['POST'])
+@require_auth(roles=['patient'])
+def accept_consent():
+    try:
+        data = request.get_json(silent=True) or {}
+        version = str(data.get('version') or '').strip()
+        if version != CONSENT_VERSION:
+            # The page the patient read is out of date; make them read the new one.
+            return jsonify({'error': 'The consent terms have been updated. Please refresh the page and read them again',
+                            'current_version': CONSENT_VERSION}), 409
+
+        db = get_db()
+        accepted_at = datetime.utcnow().isoformat()
+        db.collection('users').document(g.user['id']).update(
+            {'consent': {'version': version, 'accepted_at': accepted_at}})
+        _log_consent(db, g.user['id'], version, 'accepted', 'app')
+        return jsonify({'accepted_version': version, 'accepted_at': accepted_at}), 200
     except Exception as e:
         return server_error(e)
